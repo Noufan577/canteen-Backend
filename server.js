@@ -12,6 +12,7 @@ const adminRoutes = require('./routes/admin');
 // --- Import Models ---
 const MenuItem = require('./models/menuItem');
 const Order = require('./models/order');
+const User = require('./models/user'); // This was missing but is needed by other files
 
 const app = express();
 const PORT = 3000;
@@ -21,9 +22,8 @@ app.use(cors());
 app.use(express.json());
 
 // --- API Routes Setup ---
-// All your routes should be grouped here
 app.use('/api/auth', authRoutes);
-app.use('/api/admin', authMiddleware(['manager']), adminRoutes); // This is now in the correct place
+app.use('/api/admin', authMiddleware(['manager']), adminRoutes);
 
 // --- Database Connection ---
 mongoose.connect(process.env.DB_URI || 'mongodb://localhost:27017/canteenDB')
@@ -113,6 +113,52 @@ app.post('/api/orders/scan', authMiddleware(['staff', 'manager']), async (req, r
     res.status(200).json({ message: 'Order Redeemed Successfully!', order });
   } catch (error) {
     res.status(500).json({ message: 'Server error during scan.' });
+  }
+});
+
+// GET DAILY REPORT (Protected - Manager Only)
+app.get('/api/admin/reports/daily', authMiddleware(['manager']), async (req, res) => {
+  try {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const orders = await Order.find({
+      orderTimestamp: { $gte: startOfDay, $lte: endOfDay },
+      status: { $in: ['Paid', 'Redeemed'] }
+    });
+
+    if (orders.length === 0) {
+      return res.status(404).json({ message: 'No orders found for today.' });
+    }
+
+    const reportData = [];
+    orders.forEach(order => {
+      order.items.forEach(item => {
+        reportData.push({
+          orderId: order._id,
+          status: order.status,
+          date: order.orderTimestamp.toLocaleDateString(),
+          time: order.orderTimestamp.toLocaleTimeString(),
+          itemName: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          itemTotal: item.quantity * item.price
+        });
+      });
+    });
+
+    const fields = ['orderId', 'status', 'date', 'time', 'itemName', 'quantity', 'price', 'itemTotal'];
+    const json2csvParser = new Parser({ fields });
+    const csv = json2csvParser.parse(reportData);
+
+    res.header('Content-Type', 'text/csv');
+    res.attachment(`daily_report_${new Date().toISOString().slice(0,10)}.csv`);
+    res.send(csv);
+
+  } catch (error) {
+    res.status(500).send({ message: 'Error generating report', error: error.message });
   }
 });
 
