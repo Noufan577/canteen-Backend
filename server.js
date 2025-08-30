@@ -12,7 +12,7 @@ const adminRoutes = require('./routes/admin');
 // --- Import Models ---
 const MenuItem = require('./models/menuItem');
 const Order = require('./models/order');
-const User = require('./models/user'); // Ensure User model is imported
+const User = require('./models/user'); // This was missing but is needed by other files
 
 const app = express();
 const PORT = 3000;
@@ -79,47 +79,24 @@ app.delete('/api/menu/:id', authMiddleware(['manager']), async (req, res) => {
   }
 });
 
-// CREATE A NEW ORDER (Public) - NOW WITH TRANSACTIONS
+// CREATE A NEW ORDER (Public)
 app.post('/api/checkout', async (req, res) => {
   const { items, totalAmount } = req.body;
-  const session = await mongoose.startSession();
-  
   try {
-    session.startTransaction();
-
     for (const item of items) {
-      const menuItem = await MenuItem.findOne({ name: item.name }).session(session);
+      const menuItem = await MenuItem.findOne({ name: item.name });
       if (!menuItem || menuItem.quantity < item.quantity) {
-        throw new Error(`Sorry, ${item.name} is sold out or not enough in stock!`);
+        return res.status(400).json({ message: `Sorry, ${item.name} is sold out or not enough in stock!` });
       }
     }
-
     const newOrder = new Order({ items, totalAmount, status: 'Paid' });
-    // .save() within a transaction returns an array
-    const savedOrderArray = await newOrder.save({ session });
-    const savedOrder = savedOrderArray[0];
-
+    const savedOrder = await newOrder.save();
     for (const item of items) {
-      await MenuItem.updateOne(
-        { name: item.name },
-        { $inc: { quantity: -item.quantity } },
-        { session }
-      );
+      await MenuItem.updateOne({ name: item.name }, { $inc: { quantity: -item.quantity } });
     }
-
-    await session.commitTransaction();
-    
-    res.status(201).json({ 
-      message: "Order created successfully!",
-      orderId: savedOrder._id 
-    });
-
+    res.status(201).json({ message: "Order created successfully!", orderId: savedOrder._id });
   } catch (err) {
-    await session.abortTransaction();
-    console.error("Checkout Transaction Error:", err);
-    res.status(400).json({ message: err.message || "Failed to create order." });
-  } finally {
-    session.endSession();
+    res.status(500).json({ message: "Failed to create order", error: err.message });
   }
 });
 
@@ -185,7 +162,5 @@ app.get('/api/admin/reports/daily', authMiddleware(['manager']), async (req, res
   }
 });
 
-
 // --- Server Start ---
 app.listen(PORT, () => console.log(`🚀 Backend server running on port ${PORT}`));
-
