@@ -12,7 +12,7 @@ const adminRoutes = require('./routes/admin');
 // --- Import Models ---
 const MenuItem = require('./models/menuItem');
 const Order = require('./models/order');
-const User = require('./models/user'); // This was missing but is needed by other files
+const User = require('./models/user');
 
 const app = express();
 const PORT = 3000;
@@ -50,6 +50,7 @@ app.post('/api/menu', authMiddleware(['manager']), async (req, res) => {
     imageUrl: req.body.imageUrl,
     category: req.body.category,
     quantity: req.body.quantity
+    // Note: We'll need to update this for multi-canteen logic later
   });
   try {
     const savedItem = await newItem.save();
@@ -79,26 +80,70 @@ app.delete('/api/menu/:id', authMiddleware(['manager']), async (req, res) => {
   }
 });
 
-// CREATE A NEW ORDER (Public)
+// CREATE A NEW ORDER (Public) - MODIFIED FOR MULTI-CANTEEN
 app.post('/api/checkout', async (req, res) => {
   const { items, totalAmount } = req.body;
+  const session = await mongoose.startSession();
+  
   try {
+    session.startTransaction();
+
+    if (items.length === 0) {
+      throw new Error("Cannot checkout with an empty cart.");
+    }
+
+    // Find the canteen ID from the first item in the cart.
+    // This assumes all items in a single order belong to the same canteen.
+    const firstItemName = items[0].name;
+    const representativeMenuItem = await MenuItem.findOne({ name: firstItemName }).session(session);
+    if (!representativeMenuItem) {
+      throw new Error(`Item ${firstItemName} not found.`);
+    }
+    const canteenId = representativeMenuItem.canteen;
+
+    // Step 1: Check stock for all items
     for (const item of items) {
-      const menuItem = await MenuItem.findOne({ name: item.name });
+      const menuItem = await MenuItem.findOne({ name: item.name, canteen: canteenId }).session(session);
       if (!menuItem || menuItem.quantity < item.quantity) {
-        return res.status(400).json({ message: `Sorry, ${item.name} is sold out or not enough in stock!` });
+        throw new Error(`Sorry, ${item.name} is sold out or not enough in stock!`);
       }
     }
-    const newOrder = new Order({ items, totalAmount, status: 'Paid' });
-    const savedOrder = await newOrder.save();
+
+    // Step 2: If all items are in stock, create the order with the canteenId
+    const newOrder = new Order({ 
+      items, 
+      totalAmount, 
+      status: 'Paid',
+      canteen: canteenId // <-- THE FIX
+    });
+    const savedOrderArray = await newOrder.save({ session });
+    const savedOrder = savedOrderArray[0];
+
+    // Step 3: Decrease the quantity of each menu item
     for (const item of items) {
-      await MenuItem.updateOne({ name: item.name }, { $inc: { quantity: -item.quantity } });
+      await MenuItem.updateOne(
+        { name: item.name, canteen: canteenId },
+        { $inc: { quantity: -item.quantity } },
+        { session }
+      );
     }
-    res.status(201).json({ message: "Order created successfully!", orderId: savedOrder._id });
+
+    await session.commitTransaction();
+    
+    res.status(201).json({ 
+      message: "Order created successfully!",
+      orderId: savedOrder._id 
+    });
+
   } catch (err) {
-    res.status(500).json({ message: "Failed to create order", error: err.message });
+    await session.abortTransaction();
+    console.error("Checkout Transaction Error:", err);
+    res.status(400).json({ message: err.message || "Failed to create order." });
+  } finally {
+    session.endSession();
   }
 });
+
 
 // VERIFY AND REDEEM A QR CODE (Protected - Staff/Manager)
 app.post('/api/orders/scan', authMiddleware(['staff', 'manager']), async (req, res) => {
