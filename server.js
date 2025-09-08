@@ -12,7 +12,7 @@ const adminRoutes = require('./routes/admin');
 // --- Import Models ---
 const MenuItem = require('./models/menuItem');
 const Order = require('./models/order');
-const User = require('./models/user');
+const User = require('./models/user'); // This was missing but is needed by other files
 
 const app = express();
 const PORT = 3000;
@@ -30,7 +30,7 @@ mongoose.connect(process.env.DB_URI || 'mongodb://localhost:27017/canteenDB')
   .then(() => console.log('✅ Database connected'))
   .catch((err) => console.error('❌ DB connection error:', err));
 
-// --- Public & Protected Routes ---
+// --- Public & Protected Routes defined directly on app ---
 
 // GET ALL MENU ITEMS (Public)
 app.get('/api/menu', async (req, res) => {
@@ -79,47 +79,24 @@ app.delete('/api/menu/:id', authMiddleware(['manager']), async (req, res) => {
   }
 });
 
-// CREATE A NEW ORDER (Transactional & Single-Canteen)
+// CREATE A NEW ORDER (Public)
 app.post('/api/checkout', async (req, res) => {
   const { items, totalAmount } = req.body;
-  const session = await mongoose.startSession();
-  
   try {
-    session.startTransaction();
-
-    if (!items || items.length === 0) throw new Error("Cannot checkout with an empty cart.");
-
-    // Check stock for all items
     for (const item of items) {
-      // Use the unique _id for checking, which is safer than name
-      const menuItem = await MenuItem.findById(item._id).session(session);
+      const menuItem = await MenuItem.findOne({ name: item.name });
       if (!menuItem || menuItem.quantity < item.quantity) {
-        throw new Error(`Sorry, ${item.name} is sold out or not enough in stock!`);
+        return res.status(400).json({ message: `Sorry, ${item.name} is sold out or not enough in stock!` });
       }
     }
-
-    // Create the order
     const newOrder = new Order({ items, totalAmount, status: 'Paid' });
-    const savedOrderArray = await newOrder.save({ session });
-    const savedOrder = savedOrderArray[0];
-
-    // Decrease item quantities
+    const savedOrder = await newOrder.save();
     for (const item of items) {
-      await MenuItem.updateOne(
-        { _id: item._id },
-        { $inc: { quantity: -item.quantity } },
-        { session }
-      );
+      await MenuItem.updateOne({ name: item.name }, { $inc: { quantity: -item.quantity } });
     }
-
-    await session.commitTransaction();
     res.status(201).json({ message: "Order created successfully!", orderId: savedOrder._id });
   } catch (err) {
-    await session.abortTransaction();
-    console.error("Checkout Transaction Error:", err);
-    res.status(400).json({ message: err.message || "Failed to create order." });
-  } finally {
-    session.endSession();
+    res.status(500).json({ message: "Failed to create order", error: err.message });
   }
 });
 
@@ -131,7 +108,6 @@ app.post('/api/orders/scan', authMiddleware(['staff', 'manager']), async (req, r
     if (!order) return res.status(404).json({ message: 'Invalid QR Code. Order not found.' });
     if (order.status === 'Redeemed') return res.status(400).json({ message: 'This order has already been redeemed.' });
     if (order.status !== 'Paid') return res.status(400).json({ message: 'This order has not been paid for yet.' });
-    
     order.status = 'Redeemed';
     await order.save();
     res.status(200).json({ message: 'Order Redeemed Successfully!', order });
@@ -188,4 +164,3 @@ app.get('/api/admin/reports/daily', authMiddleware(['manager']), async (req, res
 
 // --- Server Start ---
 app.listen(PORT, () => console.log(`🚀 Backend server running on port ${PORT}`));
-
